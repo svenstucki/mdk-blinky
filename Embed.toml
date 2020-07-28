@@ -3,3 +3,6 @@ chip = "nrf52840"
 
 [default.rtt]
 enabled = true
+
+[default.probe]
+speed = 16000
