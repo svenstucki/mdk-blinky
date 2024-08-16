@@ -1,36 +1,45 @@
-///////#![no_std]
-#![cfg_attr(not(test), no_std)]
 #![no_main]
+#![no_std]
 
-use panic_halt as _;
-use nrf52840_hal as hal;
+use core::panic::PanicInfo;
+use cortex_m as _;
+use cortex_m_rt::entry;
+use embedded_hal::delay::DelayNs;
+use embedded_hal::digital::OutputPin;
 use hal::gpio::Level;
+use nrf52840_hal as hal;
 use rtt_target::{rprintln, rtt_init_print};
-
-use hal::prelude::OutputPin;
 
 mod sensor;
 
-#[cortex_m_rt::entry]
+#[panic_handler]
+fn panic(info: &PanicInfo) -> ! {
+    rprintln!("######\n{}", info);
+    loop {}
+}
+
+#[entry]
 fn main() -> ! {
     rtt_init_print!();
 
+    let core_device = hal::pac::CorePeripherals::take().unwrap();
     let device = hal::pac::Peripherals::take().unwrap();
-    let p0 = hal::gpio::p0::Parts::new(device.P0);
+    let port0 = hal::gpio::p0::Parts::new(device.P0);
 
     // onboard RGB LED pins
     let mut rgb_led = (
-        p0.p0_23.into_push_pull_output(Level::High),
-        p0.p0_22.into_push_pull_output(Level::High),
-        p0.p0_24.into_push_pull_output(Level::High),
-    ); // 0 = R, 1 = G, 2 = B - active low
+        port0.p0_23.into_push_pull_output(Level::High),
+        port0.p0_22.into_push_pull_output(Level::High),
+        port0.p0_24.into_push_pull_output(Level::High),
+    ); // pins are (R, G, B) - active low
     rgb_led.0.set_low().unwrap();
+    rgb_led.1.set_low().unwrap();
 
     let mut uart = hal::Uarte::new(
         device.UARTE0,
         hal::uarte::Pins {
-            txd: p0.p0_06.into_push_pull_output(Level::High).degrade(),
-            rxd: p0.p0_07.into_floating_input().degrade(),
+            txd: port0.p0_06.into_push_pull_output(Level::High).degrade(),
+            rxd: port0.p0_07.into_floating_input().degrade(),
             cts: None,
             rts: None,
         },
@@ -38,7 +47,7 @@ fn main() -> ! {
         hal::uarte::Baudrate::BAUD9600,
     );
 
-    let mut delay = hal::delay::Delay::new(hal::pac::SYST);
+    let mut delay = hal::delay::Delay::new(core_device.SYST);
 
     loop {
         rprintln!("Reading CO2 value...");
@@ -48,10 +57,12 @@ fn main() -> ! {
         uart.read(&mut read_buffer).unwrap();
         let concentration = (read_buffer[2] as u16) << 8 | (read_buffer[3] as u16);
         let temperature = read_buffer[4] as i16 - 40;
-        rprintln!("Got CO2 value {:?} at {:?} deg C", concentration, temperature);
-    }
+        rprintln!(
+            "Got CO2 value {:?} at {:?} deg C",
+            concentration,
+            temperature
+        );
 
-    loop {
-        // rprintln!("Hello, world!");
+        delay.delay_ms(2000);
     }
 }
