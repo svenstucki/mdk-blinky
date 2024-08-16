@@ -5,4 +5,4 @@ chip = "nrf52840"
 enabled = true
 
 [default.probe]
-speed = 16000
+speed = 1600

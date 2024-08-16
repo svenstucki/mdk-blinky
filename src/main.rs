@@ -1,4 +1,5 @@
-#![no_std]
+///////#![no_std]
+#![cfg_attr(not(test), no_std)]
 #![no_main]
 
 use panic_halt as _;
@@ -37,16 +38,20 @@ fn main() -> ! {
         hal::uarte::Baudrate::BAUD9600,
     );
 
-    rprintln!("Reading CO2 value...");
-    let read_cmd: [u8; 9] = [0xff, 0x01, 0x86, 0x00, 0x00, 0x00, 0x00, 0x00, 0x79];
-    let mut read_buffer: [u8; 9] = [0x00; 9];
-    uart.write(&read_cmd).unwrap();
-    uart.read(&mut read_buffer).unwrap();
-    let concentration = (read_buffer[2] as u16) << 8 | (read_buffer[3] as u16);
-    let temperature = read_buffer[4] as i16 - 40;
-    rprintln!("Got CO2 value {:?} at {:?} deg C", concentration, temperature);
+    let mut delay = hal::delay::Delay::new(hal::pac::SYST);
 
     loop {
-        rprintln!("Hello, world!");
+        rprintln!("Reading CO2 value...");
+        let read_cmd: [u8; 9] = [0xff, 0x01, 0x86, 0x00, 0x00, 0x00, 0x00, 0x00, 0x79];
+        let mut read_buffer: [u8; 9] = [0x00; 9];
+        uart.write(&read_cmd).unwrap();
+        uart.read(&mut read_buffer).unwrap();
+        let concentration = (read_buffer[2] as u16) << 8 | (read_buffer[3] as u16);
+        let temperature = read_buffer[4] as i16 - 40;
+        rprintln!("Got CO2 value {:?} at {:?} deg C", concentration, temperature);
+    }
+
+    loop {
+        // rprintln!("Hello, world!");
     }
 }

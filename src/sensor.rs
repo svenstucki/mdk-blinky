@@ -1,6 +1,8 @@
 //! # MH-Z19B Sensor Library
 //!
 //! Functions and constants to interface with the MH-Z19B CO2 sensor.
+//!
+//! See here: https://revspace.nl/MH-Z19B
 
 pub fn calculate_checksum(packet: [u8; 9]) -> u8 {
     let mut checksum = 0u8;
