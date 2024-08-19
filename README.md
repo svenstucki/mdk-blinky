@@ -1,11 +1,16 @@
-# mdk-blink
+# BLE CO2 Sensor
+
+This embedded project measures CO2 concentration from a MH-Z19B sensor and
+publishes the result via BLE.
+
+It is built for the Makerdiary [nRF52840-MDK](https://wiki.makerdiary.com/nrf52840-mdk/) hardware.
 
 
 ## Toolchain setup
 
 Prerequisites: rust and cargo
 
-1. `cargo install cargo-embed`
+1. `cargo install probe-rs-tools --locked`
 2. `rustup target add thumbv7em-none-eabihf`
 
 
@@ -21,4 +26,17 @@ application will not start properly without it.
 
 ## Run application
 
+Use the following command to debug the application:
+
 `DEFMT_LOG=debug cargo embed`
+
+Flash a release build with:
+
+`cargo embed --release`
+
+
+## References
+
+Pinout:
+
+![pinout](https://wiki.makerdiary.com/nrf52840-mdk/images/nrf52840-mdk-pinout.jpg)
