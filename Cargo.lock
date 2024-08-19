@@ -632,6 +632,7 @@ dependencies = [
  "embassy-sync 0.6.0",
  "embassy-time",
  "embedded-hal 1.0.0",
+ "futures",
  "nrf-softdevice",
  "nrf-softdevice-s140",
  "nrf52840-hal",

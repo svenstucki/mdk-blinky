@@ -20,3 +20,4 @@ embassy-executor = { version = "0.6.0", features = ["defmt", "arch-cortex-m", "e
 embassy-time = { version = "0.3.0", features = ["defmt", "defmt-timestamp-uptime"]}
 assign-resources = { git = "https://github.com/adamgreig/assign-resources", rev = "94ad10e2729afdf0fd5a77cd12e68409a982f58a" }
 embassy-sync = "0.6.0"
+futures = { version = "0.3.30", default-features = false }

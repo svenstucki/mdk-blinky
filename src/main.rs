@@ -7,18 +7,22 @@ use core::panic::PanicInfo;
 use cortex_m as _;
 use defmt;
 use defmt_rtt as _;
-use embassy_nrf::{
-    interrupt::{self, InterruptExt},
-    bind_interrupts,
-    uarte,
-    gpio::{Level, Output, OutputDrive},
-    pwm::{Prescaler, SimplePwm},
-    peripherals,
-    self,
-};
 use embassy_executor::Spawner;
+use embassy_nrf::{
+    self, bind_interrupts,
+    interrupt::{self, InterruptExt},
+    peripherals,
+    pwm::{Prescaler, SimplePwm},
+    uarte,
+};
+use embassy_sync::{
+    blocking_mutex::raw::ThreadModeRawMutex, pubsub::PubSubChannel, signal::Signal,
+};
 use embassy_time::Timer;
-use embassy_sync::{signal::Signal, blocking_mutex::raw::ThreadModeRawMutex};
+use futures::{
+    future::{select, Either},
+    pin_mut,
+};
 use nrf_softdevice::ble::advertisement_builder::{
     Flag, LegacyAdvertisementBuilder, LegacyAdvertisementPayload, ServiceList, ServiceUuid16,
 };
@@ -30,7 +34,11 @@ mod sensor;
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
     if let Some(location) = info.location() {
-        defmt::error!("\n###### Panic occured in file '{}' at line {}", location.file(), location.line());
+        defmt::error!(
+            "\n###### Panic occured in file '{}' at line {}",
+            location.file(),
+            location.line()
+        );
     } else {
         defmt::error!("\n###### Panic occured at unknown location");
     }
@@ -47,9 +55,9 @@ async fn softdevice_task(sd: &'static Softdevice) -> ! {
 
 #[nrf_softdevice::gatt_service(uuid = "b22d7f14-9361-4309-932e-ffbdefed97fe")]
 struct CO2Service {
-    #[characteristic(uuid = "c7d0c8a8-db04-4199-869d-5f80091f2036", read, notify, indicate)]
+    #[characteristic(uuid = "c7d0c8a8-db04-4199-869d-5f80091f2036", read, notify)]
     concentration: u16,
-    #[characteristic(uuid = "c7d0c8a8-db04-4199-869d-5f80091f2037", read, notify, indicate)]
+    #[characteristic(uuid = "c7d0c8a8-db04-4199-869d-5f80091f2037", read, notify)]
     temperature: i16,
     #[characteristic(uuid = "c7d0c8a8-db04-4199-869d-5f80091f2038", read, write)]
     rgb_led: u32,
@@ -86,9 +94,16 @@ async fn co2_sensor_task(sensor_uart: SensorUart) {
     let mut config = uarte::Config::default();
     config.parity = uarte::Parity::EXCLUDED;
     config.baudrate = uarte::Baudrate::BAUD9600;
-    let mut uart = uarte::Uarte::new(sensor_uart.uart, Irqs, sensor_uart.rx, sensor_uart.tx, config);
+    let mut uart = uarte::Uarte::new(
+        sensor_uart.uart,
+        Irqs,
+        sensor_uart.rx,
+        sensor_uart.tx,
+        config,
+    );
     defmt::debug!("UART initialised");
 
+    let publisher = CO2_MEASUREMENT_CHANNEL.publisher().unwrap();
     loop {
         defmt::info!("Reading CO2 value...");
         let read_cmd: [u8; 9] = [0xff, 0x01, 0x86, 0x00, 0x00, 0x00, 0x00, 0x00, 0x79];
@@ -96,16 +111,21 @@ async fn co2_sensor_task(sensor_uart: SensorUart) {
         let mut read_buffer: [u8; 9] = [0x00; 9];
         defmt::unwrap!(uart.read(&mut read_buffer).await);
 
-        let concentration = (read_buffer[2] as u16) << 8 | (read_buffer[3] as u16);
-        let temperature = read_buffer[4] as i16 - 40;
-        defmt::info!(
-            " got concentration {} ppm at {} deg C",
-            concentration,
-            temperature
-        );
+        let measurement = Co2Measurement {
+            concentration: (read_buffer[2] as u16) << 8 | (read_buffer[3] as u16),
+            temperature: read_buffer[4] as i16 - 40,
+        };
+        defmt::info!(" got {}", measurement);
+        publisher.publish_immediate(measurement);
 
         Timer::after_secs(2).await;
     }
+}
+
+#[derive(Clone, defmt::Format)]
+struct Co2Measurement {
+    concentration: u16,
+    temperature: i16,
 }
 
 assign_resources! {
@@ -127,6 +147,8 @@ bind_interrupts!(struct Irqs {
 });
 
 static RGB_LED_COLOR: Signal<ThreadModeRawMutex, u32> = Signal::new();
+static CO2_MEASUREMENT_CHANNEL: PubSubChannel<ThreadModeRawMutex, Co2Measurement, 1, 1, 1> =
+    PubSubChannel::new();
 
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
@@ -176,7 +198,9 @@ async fn main(spawner: Spawner) {
             current_len: 9,
             max_len: 9,
             write_perm: unsafe { mem::zeroed() },
-            _bitfield_1: raw::ble_gap_cfg_device_name_t::new_bitfield_1(raw::BLE_GATTS_VLOC_STACK as u8),
+            _bitfield_1: raw::ble_gap_cfg_device_name_t::new_bitfield_1(
+                raw::BLE_GATTS_VLOC_STACK as u8,
+            ),
         }),
         ..Default::default()
     };
@@ -186,14 +210,13 @@ async fn main(spawner: Spawner) {
 
     static ADV_DATA: LegacyAdvertisementPayload = LegacyAdvertisementBuilder::new()
         .flags(&[Flag::GeneralDiscovery, Flag::LE_Only])
-        .services_16(ServiceList::Complete, &[ServiceUuid16::BATTERY])
         .full_name("RustCO2Sensor")
         .build();
     static SCAN_DATA: LegacyAdvertisementPayload = LegacyAdvertisementBuilder::new()
         .services_128(
             ServiceList::Complete,
             &[0xb22d7f14_9361_4309_932e_ffbdefed97fe_u128.to_le_bytes()],
-            )
+        )
         .build();
 
     loop {
@@ -207,30 +230,44 @@ async fn main(spawner: Spawner) {
         defmt::info!("got connection, stop advertising");
 
         // Run the GATT server on the connection. This returns when the connection gets disconnected.
-        //
-        // Event enums (ServerEvent's) are generated by nrf_softdevice::gatt_server
-        // proc macro when applied to the Server struct above
         let gatt_future = gatt_server::run(&conn, &server, |e| match e {
             ServerEvent::Co2(e) => match e {
-                CO2ServiceEvent::ConcentrationCccdWrite {
-                    indications,
-                    notifications,
-                } => {
-                    defmt::info!("concentration indications: {}, notifications: {}", indications, notifications)
-                },
-                CO2ServiceEvent::TemperatureCccdWrite {
-                    indications,
-                    notifications,
-                } => {
-                    defmt::info!("temperature indications: {}, notifications: {}", indications, notifications)
-                },
+                CO2ServiceEvent::ConcentrationCccdWrite { notifications } => {
+                    defmt::debug!("concentration notifications {}", notifications)
+                }
+                CO2ServiceEvent::TemperatureCccdWrite { notifications } => {
+                    defmt::debug!("temperature notifications {}", notifications)
+                }
                 CO2ServiceEvent::RgbLedWrite(val) => {
-                    defmt::info!("got value {} for RGB LED", val);
+                    defmt::info!("Setting new RGB LED value {}", val);
                     RGB_LED_COLOR.signal(val)
-                },
+                }
             },
         });
-        let e = gatt_future.await;
-        defmt::info!("gatt_server run exited with error: {:?}", e);
+
+        let measurement_future = async {
+            let mut subscriber = CO2_MEASUREMENT_CHANNEL.subscriber().unwrap();
+            loop {
+                let measurement = subscriber.next_message_pure().await;
+                let _ = server
+                    .co2
+                    .concentration_notify(&conn, &measurement.concentration);
+                let _ = server
+                    .co2
+                    .temperature_notify(&conn, &measurement.temperature);
+            }
+        };
+
+        pin_mut!(gatt_future);
+        pin_mut!(measurement_future);
+
+        let _ = match select(gatt_future, measurement_future).await {
+            Either::Left((e, _)) => {
+                defmt::info!("gatt_server run exited with error: {:?}", e);
+            }
+            Either::Right((_, _)) => {
+                defmt::info!("measurement future encountered an error and stopped")
+            }
+        };
     }
 }
