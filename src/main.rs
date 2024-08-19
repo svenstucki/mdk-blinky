@@ -17,7 +17,8 @@ use embassy_nrf::{
     self,
 };
 use embassy_executor::Spawner;
-use embassy_time::{Duration, Timer};
+use embassy_time::Timer;
+use embassy_sync::{signal::Signal, blocking_mutex::raw::ThreadModeRawMutex};
 use nrf_softdevice::ble::advertisement_builder::{
     Flag, LegacyAdvertisementBuilder, LegacyAdvertisementPayload, ServiceList, ServiceUuid16,
 };
@@ -50,6 +51,8 @@ struct CO2Service {
     concentration: u16,
     #[characteristic(uuid = "c7d0c8a8-db04-4199-869d-5f80091f2037", read, notify, indicate)]
     temperature: i16,
+    #[characteristic(uuid = "c7d0c8a8-db04-4199-869d-5f80091f2038", read, write)]
+    rgb_led: u32,
 }
 
 #[nrf_softdevice::gatt_server]
@@ -58,45 +61,22 @@ struct Server {
 }
 
 #[embassy_executor::task]
-async fn led_task(rgb_leds: Leds) {
-    let mut rgb_leds = (
-        Output::new(rgb_leds.r, Level::High, OutputDrive::Standard),
-        Output::new(rgb_leds.g, Level::High, OutputDrive::Standard),
-        Output::new(rgb_leds.b, Level::High, OutputDrive::Standard),
-    );
-
-    loop {
-        defmt::info!("LED R");
-        rgb_leds.2.set_high();
-        rgb_leds.0.set_low();
-        Timer::after_secs(1).await;
-        defmt::info!("LED G");
-        rgb_leds.0.set_high();
-        rgb_leds.1.set_low();
-        Timer::after_secs(1).await;
-        defmt::info!("LED B");
-        rgb_leds.1.set_high();
-        rgb_leds.2.set_low();
-        Timer::after_secs(1).await;
-    }
-    // see also https://github.com/embassy-rs/embassy/blob/main/examples/rp/src/bin/assign_resources.rs
-}
-
-#[embassy_executor::task]
 async fn led_pwm_task(rgb_leds: Leds) {
     defmt::debug!("PWM initialising");
     let mut pwm = SimplePwm::new_3ch(rgb_leds.pwm, rgb_leds.r, rgb_leds.g, rgb_leds.b);
     pwm.set_prescaler(Prescaler::Div64);
     pwm.set_max_duty(255);
+    pwm.set_duty(0, 0);
+    pwm.set_duty(1, 0);
+    pwm.set_duty(2, 0);
     defmt::debug!("PWM initialised");
 
-    pwm.set_duty(0, 5);
-    pwm.set_duty(1, 5);
-    pwm.set_duty(2, 5);
-    defmt::debug!("PWM set");
-
     loop {
-        Timer::after_secs(1).await;
+        let color = RGB_LED_COLOR.wait().await;
+        pwm.set_duty(0, (color & 0xff) as u16);
+        pwm.set_duty(1, ((color >> 8) & 0xff) as u16);
+        pwm.set_duty(2, ((color >> 16) & 0xff) as u16);
+        defmt::debug!("PWM set");
     }
 }
 
@@ -119,12 +99,12 @@ async fn co2_sensor_task(sensor_uart: SensorUart) {
         let concentration = (read_buffer[2] as u16) << 8 | (read_buffer[3] as u16);
         let temperature = read_buffer[4] as i16 - 40;
         defmt::info!(
-            "Got CO2 value {:?} at {:?} deg C",
+            " got concentration {} ppm at {} deg C",
             concentration,
             temperature
         );
 
-        Timer::after_secs(1).await;
+        Timer::after_secs(2).await;
     }
 }
 
@@ -145,6 +125,8 @@ assign_resources! {
 bind_interrupts!(struct Irqs {
     UARTE0_UART0 => uarte::InterruptHandler<peripherals::UARTE0>;
 });
+
+static RGB_LED_COLOR: Signal<ThreadModeRawMutex, u32> = Signal::new();
 
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
@@ -241,6 +223,10 @@ async fn main(spawner: Spawner) {
                     notifications,
                 } => {
                     defmt::info!("temperature indications: {}, notifications: {}", indications, notifications)
+                },
+                CO2ServiceEvent::RgbLedWrite(val) => {
+                    defmt::info!("got value {} for RGB LED", val);
+                    RGB_LED_COLOR.signal(val)
                 },
             },
         });
