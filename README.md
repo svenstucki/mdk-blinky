@@ -34,6 +34,10 @@ Flash a release build with:
 
 `cargo embed --release`
 
+Or flash without RTT/debugging using:
+
+`cargo flash --release --chip nRF52840_xxAA`
+
 
 ## References
 
